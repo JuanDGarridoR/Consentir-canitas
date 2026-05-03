@@ -1,11 +1,22 @@
 package com.example.consentircanitas.ui.screens
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
+import android.view.ViewGroup
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -13,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -21,265 +33,510 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
 import com.example.consentircanitas.data.AdultoRepository
+import com.example.consentircanitas.data.AsistenciaRepository
 import com.example.consentircanitas.model.AdultoMayor
-import com.google.accompanist.permissions.ExperimentalPermissionsApi
-import com.google.accompanist.permissions.isGranted
-import com.google.accompanist.permissions.rememberPermissionState
-import com.journeyapps.barcodescanner.BarcodeCallback
-import com.journeyapps.barcodescanner.BarcodeResult
-import com.journeyapps.barcodescanner.BarcodeView
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.NotFoundException
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import java.util.concurrent.Executors
 
-@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun ScanScreen(navController: NavController) {
 
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
 
-    var mensaje by remember { mutableStateOf("Centra el código QR del carnet en el recuadro para registrar asistencia.") }
+    var codigoLeido by remember { mutableStateOf("") }
+    var cedulaBuscada by remember { mutableStateOf("") }
+    var mensaje by remember { mutableStateOf("Apunta la cámara al código de barras del carnet.") }
     var adultoEncontrado by remember { mutableStateOf<AdultoMayor?>(null) }
-    var cedulaLeida by remember { mutableStateOf("") }
-    var escaneando by remember { mutableStateOf(true) }
 
-    val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
+    var permisoCamara by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permisoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permisoCamara = granted
+
+        if (!granted) {
+            mensaje = "Debes permitir el uso de la cámara para escanear."
+        }
+    }
 
     LaunchedEffect(Unit) {
-        if (!cameraPermission.status.isGranted) {
-            cameraPermission.launchPermissionRequest()
+        AsistenciaRepository.cargarAsistenciaHoy(context)
+
+        if (!permisoCamara) {
+            permisoLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    fun procesarCodigo(codigo: String) {
+        codigoLeido = codigo.trim().replace("*", "")
+
+        val cedulaExtraida = extraerCedulaDesdeCodigo(codigoLeido)
+        cedulaBuscada = cedulaExtraida
+
+        val adulto = AdultoRepository.buscarPorCedula(
+            context = context,
+            cedulaQR = cedulaExtraida
+        )
+
+        adultoEncontrado = adulto
+
+        if (adulto != null) {
+            AsistenciaRepository.registrarPresente(
+                context = context,
+                cedula = adulto.datosPersonales.numeroDocumento
+            )
+
+            mensaje = "${adulto.datosPersonales.nombreCompleto} marcado como PRESENTE."
+        } else {
+            mensaje = "No se encontró una persona con la cédula $cedulaExtraida."
         }
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF121212))
-            .verticalScroll(rememberScrollState())
+            .background(Color.Black)
+            .padding(20.dp)
     ) {
-        // Top bar
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
-        ) {
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { navController.popBackStack() }) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Volver", tint = Color.White)
+                Icon(
+                    Icons.Default.ArrowBack,
+                    contentDescription = "Volver",
+                    tint = Color.White
+                )
             }
-            Text("Tomar Asistencia", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+
+            Text(
+                text = "Tomar Asistencia",
+                color = Color.White,
+                fontSize = 20.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(30.dp))
+
+        Box(
+            modifier = Modifier
+                .width(330.dp)
+                .height(220.dp)
+                .align(Alignment.CenterHorizontally)
+                .border(
+                    width = 3.dp,
+                    color = Color(0xFF20B486),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .padding(6.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .clipToBounds(),
+            contentAlignment = Alignment.Center
+        ) {
+            if (permisoCamara) {
+                BarcodeCameraPreview(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(20.dp))
+                        .clipToBounds(),
+                    onBarcodeDetected = { codigo ->
+                        procesarCodigo(codigo)
+                    }
+                )
+            } else {
+                Text(
+                    text = "Permiso de cámara requerido",
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .width(260.dp)
+                    .height(80.dp)
+                    .border(
+                        width = 2.dp,
+                        color = Color.White.copy(alpha = 0.8f),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+            )
+
+            Text(
+                text = "CÓDIGO DE BARRAS",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 10.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "Escanea el carnet",
-            color = Color.White,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
+            text = "Centra el código de barras dentro del recuadro blanco.",
+            color = Color.White.copy(alpha = 0.8f),
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
-        Text(
-            text = "Centra el código QR del carnet en el recuadro para registrar asistencia.",
-            color = Color.White.copy(alpha = 0.6f),
-            fontSize = 14.sp,
-            textAlign = TextAlign.Center,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 32.dp)
-        )
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        // Visor de cámara — usa BarcodeView en vez de DecoratedBarcodeView
-        // para evitar el overlay con texto de código de barras
-        Box(
-            modifier = Modifier
-                .size(280.dp)
-                .align(Alignment.CenterHorizontally)
-        ) {
-            // Fondo negro redondeado
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Color.Black)
-            )
-
-            // Cámara
-            if (cameraPermission.status.isGranted) {
-                AndroidView(
-                    factory = { ctx ->
-                        BarcodeView(ctx).apply {
-                            cameraSettings.requestedCameraId = 0
-
-                            val callback = object : BarcodeCallback {
-                                override fun barcodeResult(result: BarcodeResult?) {
-                                    if (!escaneando) return
-                                    val contenido = result?.text?.trim() ?: return
-                                    if (contenido.isBlank()) return
-
-                                    escaneando = false
-                                    cedulaLeida = contenido
-
-                                    android.util.Log.d("QR_DEBUG", "Leído: '$contenido'")
-
-                                    val adulto = AdultoRepository.buscarPorCedula(
-                                        context = ctx,
-                                        cedulaQR = contenido
-                                    )
-
-                                    adultoEncontrado = adulto
-                                    mensaje = if (adulto != null) {
-                                        "Asistencia registrada correctamente."
-                                    } else {
-                                        "No se encontró a nadie con cédula: $contenido"
-                                    }
-                                }
-                            }
-
-                            decodeContinuous(callback)
-                            resume()
-
-                            lifecycleOwner.lifecycle.addObserver(object : DefaultLifecycleObserver {
-                                override fun onResume(owner: LifecycleOwner) { resume() }
-                                override fun onPause(owner: LifecycleOwner) { pause() }
-                                override fun onDestroy(owner: LifecycleOwner) { pause() }
-                            })
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(20.dp))
-                )
-            }
-
-            // Esquinas decorativas encima de la cámara
-            val cornerColor = Color(0xFF20B486)
-            val cornerSize = 28.dp
-            val cornerStroke = 3.dp
-
-            // Superior izquierda
-            Box(modifier = Modifier.align(Alignment.TopStart)) {
-                Box(modifier = Modifier.width(cornerSize).height(cornerStroke).background(cornerColor))
-                Box(modifier = Modifier.width(cornerStroke).height(cornerSize).background(cornerColor))
-            }
-            // Superior derecha
-            Box(modifier = Modifier.align(Alignment.TopEnd)) {
-                Box(modifier = Modifier.width(cornerSize).height(cornerStroke).background(cornerColor).align(Alignment.TopEnd))
-                Box(modifier = Modifier.width(cornerStroke).height(cornerSize).background(cornerColor).align(Alignment.TopEnd))
-            }
-            // Inferior izquierda
-            Box(modifier = Modifier.align(Alignment.BottomStart)) {
-                Box(modifier = Modifier.width(cornerSize).height(cornerStroke).background(cornerColor).align(Alignment.BottomStart))
-                Box(modifier = Modifier.width(cornerStroke).height(cornerSize).background(cornerColor).align(Alignment.BottomStart))
-            }
-            // Inferior derecha
-            Box(modifier = Modifier.align(Alignment.BottomEnd)) {
-                Box(modifier = Modifier.width(cornerSize).height(cornerStroke).background(cornerColor).align(Alignment.BottomEnd))
-                Box(modifier = Modifier.width(cornerStroke).height(cornerSize).background(cornerColor).align(Alignment.BottomEnd))
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Mensaje de estado
         Text(
             text = mensaje,
-            color = if (adultoEncontrado != null) Color(0xFF20B486)
-            else if (cedulaLeida.isNotBlank()) Color(0xFFFF6B6B)
-            else Color.White.copy(alpha = 0.7f),
+            color = Color.White,
             textAlign = TextAlign.Center,
-            fontSize = 14.sp,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
-        // Botón para escanear otro
-        if (!escaneando) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = {
-                    escaneando = true
-                    adultoEncontrado = null
-                    cedulaLeida = ""
-                    mensaje = "Centra el código QR del carnet en el recuadro para registrar asistencia."
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 32.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF20B486))
-            ) {
-                Text("Escanear otro QR", fontWeight = FontWeight.SemiBold)
-            }
+        if (codigoLeido.isNotBlank()) {
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Código leído: $codigoLeido",
+                color = Color.White.copy(alpha = 0.8f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
-        // Tarjeta del adulto encontrado
+        if (cedulaBuscada.isNotBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Cédula buscada: $cedulaBuscada",
+                color = Color.White.copy(alpha = 0.8f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
         adultoEncontrado?.let { adulto ->
             Spacer(modifier = Modifier.height(20.dp))
 
             Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
+                modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                )
             ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
                     Text(
                         text = adulto.datosPersonales.nombreCompleto,
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp,
-                        color = Color.White
+                        color = Color.Black
                     )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                    InfoRow("Cédula", adulto.datosPersonales.numeroDocumento)
-                    InfoRow("Teléfono", adulto.datosPersonales.telefono)
-                    InfoRow("EPS", adulto.datosMedicos.eps)
-                    InfoRow("Tipo de sangre", adulto.datosMedicos.tipoSangre)
+                    Text(
+                        text = "Documento: ${adulto.datosPersonales.numeroDocumento}",
+                        color = Color.DarkGray
+                    )
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Teléfono: ${adulto.datosPersonales.telefono}",
+                        color = Color.DarkGray
+                    )
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (adulto.activo) Color(0xFF20B486).copy(alpha = 0.15f) else Color.Red.copy(alpha = 0.15f))
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = if (adulto.activo) "✅  Participante activo" else "❌  Participante inactivo",
-                            color = if (adulto.activo) Color(0xFF20B486) else Color.Red,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp
-                        )
-                    }
+                    Text(
+                        text = "EPS: ${adulto.datosMedicos.eps}",
+                        color = Color.DarkGray
+                    )
+
+                    Text(
+                        text = "Tipo de sangre: ${adulto.datosMedicos.tipoSangre}",
+                        color = Color.DarkGray
+                    )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(text = label, color = Color.Gray, fontSize = 13.sp)
-        Text(text = value.ifBlank { "—" }, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+fun BarcodeCameraPreview(
+    modifier: Modifier = Modifier,
+    onBarcodeDetected: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val cameraExecutor = remember {
+        Executors.newSingleThreadExecutor()
     }
+
+    val previewView = remember {
+        PreviewView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            clipToOutline = true
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+
+            val preview = Preview.Builder()
+                .build()
+                .also { previewUseCase ->
+                    previewUseCase.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+            val analyzer = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also { imageAnalysis ->
+                    imageAnalysis.setAnalyzer(
+                        cameraExecutor,
+                        BarcodeAnalyzer { codigo ->
+                            onBarcodeDetected(codigo)
+                        }
+                    )
+                }
+
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                cameraProvider.unbindAll()
+
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    preview,
+                    analyzer
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+        }, ContextCompat.getMainExecutor(context))
+
+        onDispose {
+            try {
+                cameraProviderFuture.get().unbindAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            cameraExecutor.shutdown()
+        }
+    }
+
+    AndroidView(
+        factory = { previewView },
+        modifier = modifier
+    )
+}
+
+class BarcodeAnalyzer(
+    private val onBarcodeDetected: (String) -> Unit
+) : ImageAnalysis.Analyzer {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var ultimoCodigoDetectado = ""
+    private var contadorLecturasIguales = 0
+    private var ultimoCodigoEnviado = ""
+    private var ultimoEnvioTiempo = 0L
+
+    private val reader = MultiFormatReader().apply {
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(
+                    BarcodeFormat.CODE_39
+                ),
+                DecodeHintType.TRY_HARDER to true
+            )
+        )
+    }
+
+    override fun analyze(image: ImageProxy) {
+        try {
+            val width = image.width
+            val height = image.height
+            val data = obtenerDatosLuminancia(image)
+
+            val codigo = intentarLeer(data, width, height)
+                ?: intentarLeer(rotar90(data, width, height), height, width)
+                ?: intentarLeer(rotar270(data, width, height), height, width)
+
+            if (!codigo.isNullOrBlank()) {
+                val codigoLimpio = codigo
+                    .trim()
+                    .replace("*", "")
+
+                val esCedulaValida = codigoLimpio.matches(Regex("\\d{5,12}"))
+
+                if (esCedulaValida) {
+                    if (codigoLimpio == ultimoCodigoDetectado) {
+                        contadorLecturasIguales++
+                    } else {
+                        ultimoCodigoDetectado = codigoLimpio
+                        contadorLecturasIguales = 1
+                    }
+
+                    val ahora = System.currentTimeMillis()
+                    val puedeEnviar = contadorLecturasIguales >= 2 &&
+                            (codigoLimpio != ultimoCodigoEnviado || ahora - ultimoEnvioTiempo > 2500)
+
+                    if (puedeEnviar) {
+                        ultimoCodigoEnviado = codigoLimpio
+                        ultimoEnvioTiempo = ahora
+
+                        mainHandler.post {
+                            onBarcodeDetected(codigoLimpio)
+                        }
+                    }
+                }
+            }
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun intentarLeer(data: ByteArray, width: Int, height: Int): String? {
+        return try {
+            val source = PlanarYUVLuminanceSource(
+                data,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                false
+            )
+
+            val bitmap = BinaryBitmap(HybridBinarizer(source))
+            val result = reader.decodeWithState(bitmap)
+
+            reader.reset()
+
+            result.text
+        } catch (e: NotFoundException) {
+            reader.reset()
+            null
+        } catch (e: Exception) {
+            reader.reset()
+            null
+        }
+    }
+
+    private fun obtenerDatosLuminancia(image: ImageProxy): ByteArray {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+
+        val width = image.width
+        val height = image.height
+
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+
+        val data = ByteArray(width * height)
+        val row = ByteArray(rowStride)
+
+        var outputOffset = 0
+
+        for (y in 0 until height) {
+            buffer.position(y * rowStride)
+
+            val length = if (buffer.remaining() < rowStride) {
+                buffer.remaining()
+            } else {
+                rowStride
+            }
+
+            buffer.get(row, 0, length)
+
+            var inputOffset = 0
+
+            for (x in 0 until width) {
+                data[outputOffset++] = row[inputOffset]
+                inputOffset += pixelStride
+            }
+        }
+
+        return data
+    }
+
+    private fun rotar90(data: ByteArray, width: Int, height: Int): ByteArray {
+        val rotated = ByteArray(data.size)
+
+        var index = 0
+
+        for (x in 0 until width) {
+            for (y in height - 1 downTo 0) {
+                rotated[index++] = data[y * width + x]
+            }
+        }
+
+        return rotated
+    }
+
+    private fun rotar270(data: ByteArray, width: Int, height: Int): ByteArray {
+        val rotated = ByteArray(data.size)
+
+        var index = 0
+
+        for (x in width - 1 downTo 0) {
+            for (y in 0 until height) {
+                rotated[index++] = data[y * width + x]
+            }
+        }
+
+        return rotated
+    }
+}
+
+fun extraerCedulaDesdeCodigo(codigo: String): String {
+    val textoLimpio = codigo
+        .trim()
+        .replace("*", "")
+
+    if (textoLimpio.all { it.isDigit() }) {
+        return textoLimpio
+    }
+
+    val numerosEncontrados = Regex("\\d+")
+        .findAll(textoLimpio)
+        .map { it.value }
+        .toList()
+
+    return numerosEncontrados.maxByOrNull { it.length } ?: textoLimpio
 }

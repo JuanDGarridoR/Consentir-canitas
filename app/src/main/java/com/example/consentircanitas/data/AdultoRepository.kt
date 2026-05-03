@@ -25,11 +25,9 @@ object AdultoRepository {
             val datosMedicosJson = item.getJSONObject("datos_medicos")
 
             val adulto = AdultoMayor(
-                id = item.optString("id"),
                 datosPersonales = DatosPersonales(
-                    foto = datosPersonalesJson.optString("foto"),
                     nombreCompleto = datosPersonalesJson.optString("nombre_completo"),
-                    numeroDocumento = datosPersonalesJson.optString("numero_documento").trim(),
+                    numeroDocumento = datosPersonalesJson.optString("numero_documento"),
                     fechaNacimiento = datosPersonalesJson.optString("fecha_nacimiento"),
                     genero = datosPersonalesJson.optString("genero"),
                     direccion = datosPersonalesJson.optString("direccion"),
@@ -46,9 +44,7 @@ object AdultoRepository {
                     enfermedades = datosMedicosJson.optString("enfermedades"),
                     alergias = datosMedicosJson.optString("alergias"),
                     discapacidad = datosMedicosJson.optString("discapacidad")
-                ),
-                carnetFisico = item.optBoolean("carnet_fisico"),
-                activo = item.optBoolean("activo")
+                )
             )
 
             adultos.add(adulto)
@@ -58,19 +54,10 @@ object AdultoRepository {
     }
 
     fun buscarPorCedula(context: Context, cedulaQR: String): AdultoMayor? {
-        return try {
-            // Intentar parsear como JSON {"cc":"...","id":"..."}
-            val json = org.json.JSONObject(cedulaQR)
-            val cedula = json.optString("cc").trim()
+        val cedulaLimpia = cedulaQR.trim().replace("*", "")
 
-            cargarAdultos(context).firstOrNull { adulto ->
-                adulto.datosPersonales.numeroDocumento.trim() == cedula
-            }
-        } catch (e: Exception) {
-            // Si no es JSON, buscar directamente como texto plano
-            cargarAdultos(context).firstOrNull { adulto ->
-                adulto.datosPersonales.numeroDocumento.trim() == cedulaQR.trim()
-            }
+        return cargarAdultos(context).firstOrNull { adulto ->
+            adulto.datosPersonales.numeroDocumento == cedulaLimpia
         }
     }
 }

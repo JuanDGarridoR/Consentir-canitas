@@ -1,16 +1,16 @@
 package com.example.consentircanitas.model
 
 data class AdultoMayor(
-    val id: String,
     val datosPersonales: DatosPersonales,
     val contactoEmergencia: ContactoEmergencia,
-    val datosMedicos: DatosMedicos,
-    val carnetFisico: Boolean,
-    val activo: Boolean
-)
+    val datosMedicos: DatosMedicos
+) {
+    // La cédula es única, así que se usa como identificador interno.
+    val id: String
+        get() = datosPersonales.numeroDocumento
+}
 
 data class DatosPersonales(
-    val foto: String,
     val nombreCompleto: String,
     val numeroDocumento: String,
     val fechaNacimiento: String,
